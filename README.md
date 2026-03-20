@@ -25,7 +25,7 @@ Se você não quiser instalar o `ffmpeg` manualmente, o projeto tenta usar um `f
 1. Envie um `.mp3` (ou outros formatos aceitos).
 2. Escolha o modelo (ex.: `small` é um bom equilíbrio).
 3. Clique em **Transcrever**.
-4. Para áudios longos (1h+), deixe `Usar VAD` desmarcado por padrão (fica mais rápido/estável em servidores com CPU).
+4. Para áudios longos (1h+), deixe `Usar VAD` marcado por padrão (ajuda a estabilizar e reduzir processamento desnecessário).
 
 Observação: na primeira execução, o modelo do Whisper pode demorar alguns minutos para baixar.
 
