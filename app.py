@@ -10,6 +10,32 @@ from faster_whisper import WhisperModel
 st.set_page_config(page_title="Transcritor de MP3", layout="centered")
 
 
+def _maybe_login_hf() -> None:
+    """
+    Evita rate limit e falhas lentas no download de modelos no HuggingFace.
+    No Streamlit Community Cloud, configure `HF_TOKEN` como segredo.
+    """
+    try:
+        from huggingface_hub import login
+
+        token = None
+        try:
+            # Streamlit Cloud: secrets são acessíveis via st.secrets
+            token = st.secrets.get("HF_TOKEN")  # type: ignore[attr-defined]
+        except Exception:
+            token = None
+
+        token = token or os.environ.get("HF_TOKEN")
+        if token:
+            login(token=token, add_to_git_credential=False)
+    except Exception:
+        # Sem token só pode ficar mais lento, mas não deve quebrar o app.
+        return
+
+
+_maybe_login_hf()
+
+
 def _default_device() -> str:
     """
     Detecta CUDA se disponível; caso contrário usa CPU.
@@ -103,6 +129,43 @@ def _join_segments(segments) -> str:
     return transcript
 
 
+def _truncate_text(s: str, max_chars: int) -> str:
+    s = s or ""
+    if len(s) <= max_chars:
+        return s
+    return s[:max_chars] + "\n...[truncado para não travar a UI]..."
+
+
+def _join_segments_with_progress(segments, progress_placeholder, update_every: int = 25) -> str:
+    """
+    Concatena textos e atualiza a UI a cada N segmentos para parecer "vivo"
+    em transcrições longas (1h+).
+    """
+    parts = []
+    for i, seg in enumerate(segments, start=1):
+        text = (seg.text or "").strip()
+        if text:
+            parts.append(text)
+
+        if progress_placeholder is not None and i % update_every == 0:
+            partial = " ".join(parts).strip()
+            progress_placeholder.text(_truncate_text(partial, 2000))
+
+    transcript = " ".join(parts).strip()
+
+    # Ajustes leves de espaçamento antes de pontuação.
+    for a, b in [
+        (" .", "."),
+        (" ,", ","),
+        (" ?", "?"),
+        (" !", "!"),
+        (" :", ":"),
+        (" ;", ";"),
+    ]:
+        transcript = transcript.replace(a, b)
+    return transcript
+
+
 def _infer_is_video(filename: str, mime_type: str, ext: str) -> bool:
     """
     Heuristica para decidir se o arquivo é vídeo.
@@ -135,8 +198,9 @@ def main():
     with col_model:
         model_size = st.selectbox(
             "Modelo Whisper",
-            options=["tiny", "base", "small", "medium", "large-v2"],
-            index=2,
+            # Em servidores compartilhados, modelos maiores costumam estourar tempo/memória em áudios longos.
+            options=["tiny", "base", "small"],
+            index=0,
             help="Modelos maiores tendem a ser mais precisos (e mais lentos).",
         )
 
@@ -167,6 +231,10 @@ def main():
     )
 
     show_segments = st.checkbox("Mostrar segmentos com tempo", value=False)
+    use_vad = st.checkbox(
+        "Usar VAD (detecção de fala; pode ficar mais pesado em áudios longos)",
+        value=False,
+    )
     run_button = st.button("Transcrever", disabled=(uploaded_file is None), key="transcribe_btn")
 
     if run_button and uploaded_file is not None:
@@ -200,15 +268,48 @@ def main():
                         _ffmpeg_extract_audio(audio_path, audio_for_whisper)
                         st.info("Arquivo de vídeo detectado. Áudio extraído com `ffmpeg`.")
 
-                    segments, info = model.transcribe(
-                        audio_for_whisper,
-                        language=language_arg,
-                        vad_filter=True,
-                    )
+                    transcribe_kwargs = {
+                        "language": language_arg,
+                        "vad_filter": use_vad,
+                        # Para áudios longos, evita picos de memória/timeouts
+                        # processando o arquivo em blocos.
+                        "chunk_length": 30,
+                        "stride_length": 5,
+                        # Reduz custo de decodificação (ajuda em CPU e arquivos longos)
+                        "beam_size": 1,
+                        "temperature": 0.0,
+                        "condition_on_previous_text": False,
+                    }
 
-                    # `segments` é iterável; precisamos materializar se quisermos mostrar tempos.
-                    segments_list = list(segments)
-                    transcript = _join_segments(segments_list)
+                    try:
+                        segments, info = model.transcribe(audio_for_whisper, **transcribe_kwargs)
+                    except TypeError:
+                        # Compatibilidade com versões diferentes do faster-whisper:
+                        # alguns parâmetros podem não existir.
+                        fallback = dict(transcribe_kwargs)
+                        fallback.pop("stride_length", None)
+                        fallback.pop("chunk_length", None)
+                        try:
+                            segments, info = model.transcribe(audio_for_whisper, **fallback)
+                        except TypeError:
+                            # Última tentativa: remove também os parâmetros de decodificação.
+                            for k in ["beam_size", "temperature", "condition_on_previous_text"]:
+                                fallback.pop(k, None)
+                            segments, info = model.transcribe(audio_for_whisper, **fallback)
+
+                    # `segments` é um iterável/gerador; para áudios longos,
+                    # não materializamos a lista inteira quando o usuário
+                    # não pediu para mostrar os segmentos.
+                    if show_segments:
+                        segments_list = list(segments)
+                        transcript = _join_segments(segments_list)
+                    else:
+                        segments_list = []
+                        progress_box = st.empty()
+                        transcript = _join_segments_with_progress(segments, progress_box)
+
+                    # Evita travar a UI em transcrições muito longas.
+                    display_transcript = _truncate_text(transcript, 20000)
             except subprocess.CalledProcessError as e:
                 st.error("Falha ao extrair/decodificar com `ffmpeg`.")
                 if e.stderr:
@@ -220,7 +321,7 @@ def main():
                 return
 
         st.subheader("Transcrição")
-        st.text_area("Resultado", value=transcript, height=250)
+        st.text_area("Resultado", value=display_transcript, height=250)
 
         st.caption(
             f"Idioma detectado: {getattr(info, 'language', 'N/D')} | "

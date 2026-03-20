@@ -25,6 +25,11 @@ Se você não quiser instalar o `ffmpeg` manualmente, o projeto tenta usar um `f
 1. Envie um `.mp3` (ou outros formatos aceitos).
 2. Escolha o modelo (ex.: `small` é um bom equilíbrio).
 3. Clique em **Transcrever**.
+4. Para áudios longos (1h+), deixe `Usar VAD` desmarcado por padrão (fica mais rápido/estável em servidores com CPU).
 
 Observação: na primeira execução, o modelo do Whisper pode demorar alguns minutos para baixar.
+
+### Publicando no Streamlit Cloud (recomendado)
+Para evitar rate limit/falhas lentas ao baixar modelos do Whisper no HuggingFace, configure um segredo:
+- Crie um `HF_TOKEN` nas Secrets do Streamlit Cloud.
 
