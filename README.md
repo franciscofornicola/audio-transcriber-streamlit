@@ -25,9 +25,13 @@ Se você não quiser instalar o `ffmpeg` manualmente, o projeto tenta usar um `f
 1. Envie um `.mp3` (ou outros formatos aceitos).
 2. Escolha o modelo (ex.: `small` é um bom equilíbrio).
 3. Clique em **Transcrever**.
-4. Para áudios longos (1h+), deixe `Usar VAD` marcado por padrão (ajuda a estabilizar e reduzir processamento desnecessário).
+4. Para áudios longos (1h+), por padrão deixe `Usar VAD` desligado (evita cortar trechos do começo). Se quiser, ative depois.
 
 Se o texto ficar ruim/sem sentido em áudio longo, ative **"Qualidade alta"** (fica mais lento, mas costuma melhorar bastante).
+
+Em transcrições longas, a opção **"Garantir áudio do começo ao fim"** (recomendado) divide o áudio em janelas e desativa o VAD para evitar pular partes.
+
+O app também oferece **download da transcrição completa** como `.txt`.
 
 Observação: na primeira execução, o modelo do Whisper pode demorar alguns minutos para baixar.
 
