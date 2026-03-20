@@ -27,6 +27,8 @@ Se você não quiser instalar o `ffmpeg` manualmente, o projeto tenta usar um `f
 3. Clique em **Transcrever**.
 4. Para áudios longos (1h+), deixe `Usar VAD` marcado por padrão (ajuda a estabilizar e reduzir processamento desnecessário).
 
+Se o texto ficar ruim/sem sentido em áudio longo, ative **"Qualidade alta"** (fica mais lento, mas costuma melhorar bastante).
+
 Observação: na primeira execução, o modelo do Whisper pode demorar alguns minutos para baixar.
 
 ### Publicando no Streamlit Cloud (recomendado)

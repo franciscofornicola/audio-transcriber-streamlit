@@ -232,7 +232,7 @@ def main():
     with col_lang:
         language = st.text_input(
             "Idioma",
-            value="auto",
+            value="pt",
             help="Use 'auto' para detectar automaticamente ou informe um codigo (ex: 'pt', 'en').",
         )
 
@@ -252,6 +252,11 @@ def main():
     )
 
     show_segments = st.checkbox("Mostrar segmentos com tempo", value=False)
+    high_quality = st.checkbox(
+        "Qualidade alta (melhor texto, mais lento)",
+        value=False,
+        help="Aumenta `beam_size` e habilita contexto entre janelas (costuma melhorar bastante o texto em áudio longo).",
+    )
     use_vad = st.checkbox(
         "Usar VAD (recomendado para audios longos)",
         value=True,
@@ -294,6 +299,8 @@ def main():
                     transcribe_kwargs = {
                         "language": language_arg,
                         "vad_filter": use_vad,
+                        # Beam size baixo e sem contexto podem produzir texto repetitivo
+                        # em áudios longos.
                         "beam_size": 1,
                         "best_of": 1,
                         # Ajuda a reduzir memoria em instancias limitadas.
@@ -303,6 +310,10 @@ def main():
                         # Se nao mostrar segmentos, evita custo de timestamps.
                         "without_timestamps": not show_segments,
                     }
+
+                    if high_quality:
+                        transcribe_kwargs["beam_size"] = 5
+                        transcribe_kwargs["condition_on_previous_text"] = True
 
                     # `chunk_length` tende a funcionar melhor com VAD.
                     if use_vad:
