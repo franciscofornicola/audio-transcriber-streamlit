@@ -254,7 +254,7 @@ def main():
     show_segments = st.checkbox("Mostrar segmentos com tempo", value=False)
     high_quality = st.checkbox(
         "Qualidade alta (melhor texto, mais lento)",
-        value=False,
+        value=True,
         help="Aumenta `beam_size` e habilita contexto entre janelas (costuma melhorar bastante o texto em áudio longo).",
     )
     use_vad = st.checkbox(
@@ -307,6 +307,9 @@ def main():
                         "batch_size": 1,
                         "temperature": 0.0,
                         "condition_on_previous_text": False,
+                        # Reduce repeticoes/loops em transcricoes longas.
+                        "repetition_penalty": 1.1,
+                        "no_repeat_ngram_size": 3,
                         # Se nao mostrar segmentos, evita custo de timestamps.
                         "without_timestamps": not show_segments,
                     }
@@ -317,7 +320,8 @@ def main():
 
                     # `chunk_length` tende a funcionar melhor com VAD.
                     if use_vad:
-                        transcribe_kwargs["chunk_length"] = 30
+                        # 30s pode quebrar demais e piorar coerencia em alguns audios.
+                        transcribe_kwargs["chunk_length"] = 60
 
                     try:
                         segments, info = model.transcribe(audio_for_whisper, **transcribe_kwargs)
