@@ -108,6 +108,46 @@ def _ffmpeg_extract_audio(input_path: str, output_wav_path: str) -> None:
     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
+def _ffmpeg_extract_segment(input_path: str, output_path: str, start_sec: float, duration_sec: float) -> None:
+    """Extrai um trecho [start_sec, start_sec+duration_sec) para WAV 16k mono."""
+    ffmpeg_exe = shutil.which("ffmpeg")
+    if ffmpeg_exe is None:
+        try:
+            from imageio_ffmpeg import get_ffmpeg_exe
+
+            ffmpeg_exe = get_ffmpeg_exe()
+        except Exception:
+            ffmpeg_exe = None
+    if ffmpeg_exe is None:
+        raise RuntimeError("ffmpeg nao encontrado para segmentar audio.")
+
+    cmd = [
+        ffmpeg_exe,
+        "-y",
+        "-ss",
+        str(start_sec),
+        "-t",
+        str(duration_sec),
+        "-i",
+        input_path,
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-f",
+        "wav",
+        output_path,
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+# Acima disso, uma unica chamada com centenas de clip_timestamps costuma estourar RAM no Streamlit Cloud.
+LONG_AUDIO_SECONDS = 600.0
+# Duracao de cada bloco em modo sequencial (menos picos de memoria).
+SEQUENTIAL_CHUNK_SECONDS = 600.0
+
+
 VIDEO_EXTS = {"mp4", "mpeg", "mpg", "webm", "mov", "mkv", "avi", "m4v"}
 
 
@@ -291,6 +331,11 @@ def main():
                 f.write(uploaded_file.getbuffer())
 
             try:
+                if not stable_wav and getattr(uploaded_file, "size", 0) > 40 * 1024 * 1024:
+                    st.warning(
+                        "Arquivo grande: deixe **Converter para WAV 16k mono** ligado para reduzir chance de crash no servidor."
+                    )
+
                 with st.spinner(
                     f"Carregando modelo `{model_size}` (device: {device}, compute_type: {compute_type})..."
                 ):
@@ -335,75 +380,120 @@ def main():
                         transcribe_kwargs["beam_size"] = 5
                         transcribe_kwargs["condition_on_previous_text"] = True
 
-                    # Quando queremos "do começo ao fim" sem pular trechos,
-                    # passamos `clip_timestamps` por janelas pequenas e desativamos VAD.
-                    if force_full_audio:
-                        # Precisamos da duracao em segundos; se `stable_wav` estiver ligado,
-                        # conseguimos ler rapidamente o header do WAV.
-                        duration_s = None
-                        if wav_path is not None:
-                            try:
-                                with wave.open(wav_path, "rb") as wf:
-                                    duration_s = wf.getnframes() / float(wf.getframerate())
-                            except Exception:
-                                duration_s = None
+                    duration_s = None
+                    if wav_path is not None:
+                        try:
+                            with wave.open(wav_path, "rb") as wf:
+                                duration_s = wf.getnframes() / float(wf.getframerate())
+                        except Exception:
+                            duration_s = None
 
-                        # Se nao conseguiu medir duracao, cai para o modo normal.
-                        if duration_s is not None and duration_s > 0:
-                            clip_seconds = 25.0  # <= 30s para evitar cortes internos
+                    segments_list = []
+                    progress_box = st.empty()
+                    max_segments_to_show = 2000
+                    preview_window_parts = 60
+                    transcript_path = os.path.join(tmpdir, "_transcript_accum.txt")
+
+                    # Audios longos: NAO usar centenas de clip_timestamps numa unica transcribe
+                    # (isso costuma dar OOM / crash no Streamlit Cloud). Processamos em blocos.
+                    use_sequential = (
+                        wav_path is not None
+                        and duration_s is not None
+                        and duration_s > LONG_AUDIO_SECONDS
+                    )
+
+                    if use_sequential:
+                        st.info(
+                            f"Audio longo (~{int(duration_s // 60)} min). "
+                            f"Transcrevendo em blocos de {int(SEQUENTIAL_CHUNK_SECONDS // 60)} min para evitar crash no servidor."
+                        )
+                        with open(transcript_path, "w", encoding="utf-8") as _tf:
+                            pass
+                        seq_kwargs = dict(transcribe_kwargs)
+                        seq_kwargs.pop("clip_timestamps", None)
+                        seq_kwargs.pop("chunk_length", None)
+                        seq_kwargs["vad_filter"] = False
+
+                        info = None
+                        seg_count = 0
+                        t0 = 0.0
+                        chunk_i = 0
+                        while t0 < duration_s:
+                            chunk_dur = min(SEQUENTIAL_CHUNK_SECONDS, duration_s - t0)
+                            chunk_wav = os.path.join(tmpdir, f"chunk_{chunk_i:04d}.wav")
+                            _ffmpeg_extract_segment(wav_path, chunk_wav, t0, chunk_dur)
+                            try:
+                                segments, info = model.transcribe(chunk_wav, **seq_kwargs)
+                            except TypeError:
+                                fb = dict(seq_kwargs)
+                                for k in ["chunk_length", "clip_timestamps", "batch_size", "without_timestamps"]:
+                                    fb.pop(k, None)
+                                segments, info = model.transcribe(chunk_wav, **fb)
+
+                            for seg in segments:
+                                seg_count += 1
+                                text = (seg.text or "").strip()
+                                if text:
+                                    with open(transcript_path, "a", encoding="utf-8") as tf:
+                                        tf.write(text + " ")
+                                if show_segments and len(segments_list) < max_segments_to_show and text:
+                                    segments_list.append(seg)
+                                if seg_count % 25 == 0:
+                                    try:
+                                        with open(transcript_path, "r", encoding="utf-8") as tf:
+                                            tail = tf.read()[-4000:]
+                                    except Exception:
+                                        tail = ""
+                                    progress_box.text(
+                                        _truncate_text(
+                                            f"Bloco {chunk_i + 1}… {int(t0 + chunk_dur)}s / {int(duration_s)}s\n{tail}",
+                                            2000,
+                                        )
+                                    )
+
+                            t0 += chunk_dur
+                            chunk_i += 1
+
+                        with open(transcript_path, "r", encoding="utf-8") as tf:
+                            transcript_full = _normalize_transcript_text(tf.read())
+
+                    else:
+                        # Quando queremos "do começo ao fim" em arquivo curto/medio: clip_timestamps finos.
+                        if force_full_audio and duration_s is not None and duration_s > 0:
+                            clip_seconds = 25.0
                             clip_vals = []
                             start = 0.0
                             while start < duration_s:
                                 end = min(start + clip_seconds, duration_s)
                                 clip_vals.extend([round(start, 3), round(end, 3)])
                                 start = end
-
-                            # faster-whisper aceita lista como string "s1,e1,s2,e2,..."
-                            clip_timestamps_arg = ",".join(str(v) for v in clip_vals)
                             transcribe_kwargs["vad_filter"] = False
-                            transcribe_kwargs["clip_timestamps"] = clip_timestamps_arg
-
-                            # Em modo clip_timestamps, `chunk_length`/VAD nao e necessario.
+                            transcribe_kwargs["clip_timestamps"] = ",".join(str(v) for v in clip_vals)
                             transcribe_kwargs.pop("chunk_length", None)
-                        else:
-                            st.warning("Nao foi possivel estimar duracao do audio para clip_timestamps. Usando modo normal.")
-                    else:
-                        # `chunk_length` tende a funcionar melhor quando VAD esta ligado.
-                        if use_vad:
+                        elif not force_full_audio and use_vad:
                             transcribe_kwargs["chunk_length"] = 60
 
-                    try:
-                        segments, info = model.transcribe(audio_for_whisper, **transcribe_kwargs)
-                    except TypeError:
-                        # Compatibilidade com versoes do faster-whisper:
-                        # remove parametros que talvez nao existam.
-                        fallback = dict(transcribe_kwargs)
-                        for k in ["chunk_length", "clip_timestamps", "batch_size", "without_timestamps"]:
-                            fallback.pop(k, None)
-                        segments, info = model.transcribe(audio_for_whisper, **fallback)
+                        try:
+                            segments, info = model.transcribe(audio_for_whisper, **transcribe_kwargs)
+                        except TypeError:
+                            fallback = dict(transcribe_kwargs)
+                            for k in ["chunk_length", "clip_timestamps", "batch_size", "without_timestamps"]:
+                                fallback.pop(k, None)
+                            segments, info = model.transcribe(audio_for_whisper, **fallback)
 
-                    segments_list = []
-                    progress_box = st.empty()
-                    parts = []
+                        parts = []
+                        preview_update_every = 25
+                        for idx, seg in enumerate(segments, start=1):
+                            text = (seg.text or "").strip()
+                            if text:
+                                parts.append(text)
+                            if show_segments and len(segments_list) < max_segments_to_show and text:
+                                segments_list.append(seg)
+                            if idx % preview_update_every == 0:
+                                partial_preview = " ".join(parts[-preview_window_parts:]).strip()
+                                progress_box.text(_truncate_text(partial_preview, 2000))
 
-                    max_segments_to_show = 2000
-                    preview_update_every = 25
-                    preview_window_parts = 60
-
-                    for idx, seg in enumerate(segments, start=1):
-                        text = (seg.text or "").strip()
-                        if text:
-                            parts.append(text)
-
-                        if show_segments and len(segments_list) < max_segments_to_show and text:
-                            segments_list.append(seg)
-
-                        # Placeholder para parecer que esta rodando (principalmente em 1h+).
-                        if idx % preview_update_every == 0:
-                            partial_preview = " ".join(parts[-preview_window_parts:]).strip()
-                            progress_box.text(_truncate_text(partial_preview, 2000))
-
-                    transcript_full = _normalize_transcript_text(" ".join(parts))
+                        transcript_full = _normalize_transcript_text(" ".join(parts))
 
                     show_full_text = st.checkbox(
                         "Mostrar transcrição completa (pode ser grande)",

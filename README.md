@@ -33,6 +33,8 @@ Em transcrições longas, a opção **"Garantir áudio do começo ao fim"** (rec
 
 O app também oferece **download da transcrição completa** como `.txt`.
 
+Audios com mais de ~10 minutos são transcritos **em blocos sequenciais** (para não estourar memória no Streamlit Cloud). Áudios muito longos ainda podem falhar por **limite de tempo** do plano gratuito — nesse caso use um servidor próprio ou divida o arquivo.
+
 Observação: na primeira execução, o modelo do Whisper pode demorar alguns minutos para baixar.
 
 ### Publicando no Streamlit Cloud (recomendado)
