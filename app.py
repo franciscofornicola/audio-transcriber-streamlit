@@ -196,6 +196,23 @@ def _truncate_text(s: str, max_chars: int) -> str:
     return s[:max_chars] + "\n...[truncado para nao travar a UI]..."
 
 
+def _tail_text_for_prompt(file_path: str, max_chars: int = 380) -> Optional[str]:
+    """Ultimo trecho do texto ja transcrito para usar como initial_prompt no proximo bloco."""
+    try:
+        with open(file_path, "r", encoding="utf-8") as tf:
+            body = tf.read()
+        body = body.strip()
+        if not body:
+            return None
+        tail = body[-max_chars:].strip()
+        # Corta no primeiro espaco para nao comecar no meio da palavra.
+        if " " in tail and len(tail) > 80:
+            tail = tail[tail.find(" ") + 1 :].strip()
+        return tail or None
+    except Exception:
+        return None
+
+
 def _join_segments_with_progress(
     segments: Iterable,
     progress_placeholder,
@@ -263,8 +280,8 @@ def main():
             "Modelo Whisper",
             # Em servidores compartilhados, modelos maiores costumam falhar/estourar tempo em audios longos.
             options=["tiny", "base", "small"],
-            index=0,
-            help="Modelos maiores tendem a ser mais precisos (e mais lentos).",
+            index=1,
+            help="Para aulas e português: use **base** ou **small**. `tiny` alucina e repete muito.",
         )
 
     with col_lang:
@@ -361,17 +378,17 @@ def main():
                     transcribe_kwargs = {
                         "language": language_arg,
                         "vad_filter": use_vad,
-                        # Beam size baixo e sem contexto podem produzir texto repetitivo
-                        # em áudios longos.
                         "beam_size": 1,
                         "best_of": 1,
-                        # Ajuda a reduzir memoria em instancias limitadas.
                         "batch_size": 1,
-                        "temperature": 0.0,
+                        # Temperaturas multiplas ajudam o Whisper a sair de decodificacoes ruins.
+                        "temperature": (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
                         "condition_on_previous_text": False,
-                        # Reduce repeticoes/loops em transcricoes longas.
-                        "repetition_penalty": 1.1,
-                        "no_repeat_ngram_size": 3,
+                        "repetition_penalty": 1.15,
+                        "no_repeat_ngram_size": 5,
+                        # Filtros anti-alucinacao (valores proximos ao Whisper original).
+                        "compression_ratio_threshold": 2.2,
+                        "log_prob_threshold": -1.0,
                         # Se nao mostrar segmentos, evita custo de timestamps.
                         "without_timestamps": not show_segments,
                     }
@@ -413,6 +430,15 @@ def main():
                         seq_kwargs.pop("clip_timestamps", None)
                         seq_kwargs.pop("chunk_length", None)
                         seq_kwargs["vad_filter"] = False
+                        # CRITICO: condition_on_previous_text em blocos separados gera loops
+                        # ("chacônia", "dinte"...). Contexto vem só via initial_prompt abaixo.
+                        seq_kwargs["condition_on_previous_text"] = False
+                        seq_kwargs["repetition_penalty"] = 1.2
+                        seq_kwargs["no_repeat_ngram_size"] = 5
+                        if high_quality:
+                            seq_kwargs["beam_size"] = 5
+                        else:
+                            seq_kwargs["beam_size"] = 3
 
                         info = None
                         seg_count = 0
@@ -422,12 +448,30 @@ def main():
                             chunk_dur = min(SEQUENTIAL_CHUNK_SECONDS, duration_s - t0)
                             chunk_wav = os.path.join(tmpdir, f"chunk_{chunk_i:04d}.wav")
                             _ffmpeg_extract_segment(wav_path, chunk_wav, t0, chunk_dur)
+                            if chunk_i == 0:
+                                seq_kwargs.pop("initial_prompt", None)
+                            else:
+                                prompt = _tail_text_for_prompt(transcript_path)
+                                if prompt:
+                                    seq_kwargs["initial_prompt"] = prompt
+                                else:
+                                    seq_kwargs.pop("initial_prompt", None)
                             try:
                                 segments, info = model.transcribe(chunk_wav, **seq_kwargs)
                             except TypeError:
                                 fb = dict(seq_kwargs)
-                                for k in ["chunk_length", "clip_timestamps", "batch_size", "without_timestamps"]:
+                                for k in [
+                                    "chunk_length",
+                                    "clip_timestamps",
+                                    "batch_size",
+                                    "without_timestamps",
+                                    "compression_ratio_threshold",
+                                    "log_prob_threshold",
+                                    "repetition_penalty",
+                                    "no_repeat_ngram_size",
+                                ]:
                                     fb.pop(k, None)
+                                fb["temperature"] = 0.0
                                 segments, info = model.transcribe(chunk_wav, **fb)
 
                             for seg in segments:
@@ -477,8 +521,18 @@ def main():
                             segments, info = model.transcribe(audio_for_whisper, **transcribe_kwargs)
                         except TypeError:
                             fallback = dict(transcribe_kwargs)
-                            for k in ["chunk_length", "clip_timestamps", "batch_size", "without_timestamps"]:
+                            for k in [
+                                "chunk_length",
+                                "clip_timestamps",
+                                "batch_size",
+                                "without_timestamps",
+                                "compression_ratio_threshold",
+                                "log_prob_threshold",
+                                "repetition_penalty",
+                                "no_repeat_ngram_size",
+                            ]:
                                 fallback.pop(k, None)
+                            fallback["temperature"] = 0.0
                             segments, info = model.transcribe(audio_for_whisper, **fallback)
 
                         parts = []

@@ -23,7 +23,7 @@ Se você não quiser instalar o `ffmpeg` manualmente, o projeto tenta usar um `f
 
 ### Uso
 1. Envie um `.mp3` (ou outros formatos aceitos).
-2. Escolha o modelo (ex.: `small` é um bom equilíbrio).
+2. Escolha o modelo: o padrão agora é **`base`** (melhor que `tiny` para português). Para máxima qualidade use **`small`** se o servidor aguentar.
 3. Clique em **Transcrever**.
 4. Para áudios longos (1h+), por padrão deixe `Usar VAD` desligado (evita cortar trechos do começo). Se quiser, ative depois.
 
